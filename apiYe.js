@@ -13,6 +13,25 @@ app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
 
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers['authorization'];
+
+  if (!authHeader) {
+    return res.status(401).json({ error: 'Auth token saknas' });
+  }
+
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+
+  try {
+    // Verifiera token med samma secret och kontrollera expiration
+    const decoded = jwt.verify(token, 'secret of secrets'); // ← Här använder du din hemliga nyckel
+    req.user = decoded; // Gör användarens data tillgänglig i req.user
+    next(); // Gå vidare till nästa middleware eller route
+  } catch (err) {
+    console.error(err);
+    return res.status(401).json({ error: 'Ogiltig eller utgången token' });
+  }
+}
 
 
 async function getDBConnnection() {
@@ -27,14 +46,21 @@ async function getDBConnnection() {
 
 app.get("/", (req, res) => {
   res.send(`<h1>Doumentation</h1>
-  <ul><li> GET /user - retunerar alla profiler i databasen</li></ul>
-  <ul><li> GET /user{id} - retunerar en specifik profil från databasen</li></ul>
-  <ul><li> POST /user - skapar en ny profil i databasen. I fomat {"username", "name", "email", "password"} där username ska vara unikt och lösenord blir hashade</li></ul>
-  <ul><li> POST /login - loggar in med username och password. Retunerar en JWT token med bearer token</li></ul>`);
+  <ul><li> {LÅS} - GET /user - retunerar alla profiler i databasen</li></ul>
+  <ul><li> {LÅS} - GET /user{id} - retunerar en specifik profil från databasen</li></ul>
+  <ul><li> {LÅS} - PUT /user{id} - Uppdaterar en profil i databasen. Måste skriva in hela objektet oavsett om man bara uppdaterar en sak</li></ul>
+  <ul><li> {LÅS} - POST /user - skapar en ny profil i databasen. I fomat {"username", "name", "email", "password"} där username ska vara unikt och lösenord blir hashade</li></ul>
+  <ul><li> POST /login - loggar in med username och password. Retunerar en JWT token med bearer token</li></ul>
+  <ul><li> GET /auth-test - Chechar sin auth-token</li></ul>
+  
+  <br><br><br><br>
+  
+
+{LÅS} - Route behöver giltig bearer-token i authorziation header `);
 });
 
 
-app.get("/user", async function (req, res) {
+app.get("/user", authMiddleware, async function (req, res) {
   let connection = await getDBConnnection();
   let sql = `SELECT Id, username, name, email from user`;
   let [results] = await connection.execute(sql);
@@ -43,7 +69,7 @@ app.get("/user", async function (req, res) {
   res.json(results);
 });
 
-app.get("/user/:id", async function (req, res) {
+app.get("/user/:id", authMiddleware, async function (req, res) {
   //kod här för att hantera anrop…
   let connection = await getDBConnnection();
 
@@ -61,7 +87,7 @@ const register = async (req, res) => {
 
 };
 
-app.post("/user", async function (req, res) {
+app.post("/user", authMiddleware, async function (req, res) {
   console.log(req.body);
   if (req.body && req.body.username) {
     //skriv till databas
@@ -117,19 +143,27 @@ let payload = {
   name: user.name // Valbar
   // kan innehålla ytterligare attribut, t.ex. roller
 }
-let token = jwt.sign(payload, 'secret of secrets')
+let token = jwt.sign(payload, 'secret of secrets', { expiresIn: 60 });
+
+
+const userInfo = {
+  id: user.id,
+  name: user.name,
+  username: user.username,
+  email: user.email
+};
 
 
 
-
-
-res.json(token);
+res.status(200).json({
+  token: token
+});
 //res.json(token);
 
 
   } else {
     // Skicka felmeddelande
-    res.status(400).json({ error: 'Invalid credentials' });
+    res.status(401).json({ error: 'Invalid credentials' });
   }
  });
  
@@ -138,41 +172,72 @@ res.json(token);
 /*
   app.post() hanterar en http request med POST-metoden.
 */
-app.post("/users", function (req, res) {
-  // Data som postats till routen ligger i body-attributet på request-objektet.
-  console.log(req.body);
 
-  // POST ska skapa något så här kommer det behövas en INSERT
-  let sql = `INSERT INTO ...`;
-});
 
-app.post("/user", async function (req, res) {
-  //data ligger i req.body. Kontrollera att det är korrekt.
 
-  if (req.body && req.body.username) {
-    //skriv till databas
-  } else {
-    //returnera med felkod 422 Unprocessable entity.
-    //eller 400 Bad Request.
-    res.sendStatus(422);
-  }
-});
-
-app.put("/user/:id", async function (req, res) {
+app.put("/user/:id", authMiddleware, async function (req, res) {
   //kod här för att hantera anrop...
-
-  let sql = `UPDATE user
-     SET username = ?, password = ?
-     WHERE id = ?`;
+  try{
 
   let connection = await getDBConnnection();
 
+  let sql = `UPDATE user
+     SET username = ?, email = ?, name = ?
+     WHERE id = ?`;
+
   let [results] = await connection.execute(sql, [
     req.body.username,
-    req.body.password,
-    req.params.id,
+    req.body.email,
+    req.body.name,
+    req.params.id
   ]);
+
+   let [updatedUser] = await connection.execute(
+      "SELECT id, username, name, email FROM user WHERE id = ?",
+      [req.params.id]
+    );
+  
+  if (results.affectedRows === 0) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  // Om uppdatering lyckas, returnera resultatet (200 OK)
+  res.status(200).json({ message: "User updated successfully", data: results, Profil: updatedUser });
+}catch (err) {
+  // Fångar eventuella fel och returnerar 500 (server error)
+  console.error(err);  // Logga felet för felsökning
+  res.status(500).json({ error: "Internal server error" });
+}
 });
+
+//Route för att testa token.
+app.get("/auth-test", function (req, res) {
+  let authHeader = req.headers["authorization"] //Hämtar värdet (en sträng med token) från authorization headern i requesten
+  
+  if (authHeader === undefined) {
+    res.status(401).send("Auth token missing or expired")
+  }
+  
+  let token = authHeader.slice(7) // Tar bort "BEARER " som står i början på strängen.
+  console.log("token: ", token)
+
+  let decoded
+  try {
+    // Verifiera att detta är en korrekt token. Den ska vara:
+    // * skapad med samma secret
+    // * omodifierad
+    // * fortfarande giltig
+    decoded = jwt.verify(token, 'secret of secrets')
+  } catch (err) {
+    // Om något är fel med token så kastas ett error.
+
+    console.error(err) //Logga felet, för felsökning på servern.
+
+    res.status(401).send("Invalid auth token")
+  }
+
+  res.send(decoded) // Skickar tillbaka den avkodade, giltiga, tokenen.
+})
 
 const port = 3000;
 app.listen(port, () => {
